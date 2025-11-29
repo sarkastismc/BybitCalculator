@@ -16,13 +16,105 @@ def get_int(prompt):
             print("Invalid integer. Try again.")
 
 
+def compute_summary(entries, side, mmr, tp, sl):
+    """
+    entries: list of dicts:
+      { "entry": float, "im": float, "lev": float, "notional": float, "size_btc": float }
+    side: 'long' or 'short'
+    mmr: maintenance margin rate
+    tp, sl: prices for take profit / stop loss
+
+    Returns a dict with all important values.
+    """
+    total_notional = sum(e["notional"] for e in entries)
+    total_btc = sum(e["size_btc"] for e in entries)
+
+    if total_btc <= 0:
+        return None
+
+    # Weighted average entry (by BTC size)
+    weighted_sum = sum(e["entry"] * e["size_btc"] for e in entries)
+    avg_entry = weighted_sum / total_btc
+
+    # Total initial margin and maintenance margin
+    total_im = sum(e["im"] for e in entries)
+    maintenance_margin = total_notional * mmr
+
+    # Estimated isolated liquidation price (simplified, no fee buffer)
+    if side == "short":
+        liq_price = avg_entry + (total_im - maintenance_margin) / total_btc
+    else:  # long
+        liq_price = avg_entry - (total_im - maintenance_margin) / total_btc
+
+    # PnL at TP and SL
+    if side == "short":
+        pnl_tp = (avg_entry - tp) * total_btc
+        pnl_sl = (avg_entry - sl) * total_btc
+    else:  # long
+        pnl_tp = (tp - avg_entry) * total_btc
+        pnl_sl = (sl - avg_entry) * total_btc
+
+    # percentage moves from avg entry
+    move_tp_pct = ((tp - avg_entry) / avg_entry) * 100.0
+    move_sl_pct = ((sl - avg_entry) / avg_entry) * 100.0
+
+    # risk : reward (use absolute values)
+    risk = abs(pnl_sl)
+    reward = abs(pnl_tp)
+    if risk > 0:
+        rr = reward / risk
+        rr_text = f"{rr:.2f} : 1"
+    else:
+        rr_text = "N/A"
+
+    return {
+        "total_notional": total_notional,
+        "total_btc": total_btc,
+        "avg_entry": avg_entry,
+        "total_im": total_im,
+        "maintenance_margin": maintenance_margin,
+        "liq_price": liq_price,
+        "pnl_tp": pnl_tp,
+        "pnl_sl": pnl_sl,
+        "move_tp_pct": move_tp_pct,
+        "move_sl_pct": move_sl_pct,
+        "rr_text": rr_text,
+        "tp": tp,
+        "sl": sl,
+    }
+
+
+def print_summary(summary, side, label="RESULTS"):
+    """Pretty print a summary block."""
+    print(f"\n===== {label} =====")
+    print(f"Side:                 {side.upper()}")
+    print(f"Total initial margin: {summary['total_im']:.2f} USDT")
+    print(f"Total notional:       {summary['total_notional']:.2f} USDT")
+    print(f"Total BTC size:       {summary['total_btc']:.8f} BTC")
+    print(f"Average entry price:  {summary['avg_entry']:.2f} USD")
+    print(f"Maintenance margin:   {summary['maintenance_margin']:.2f} USDT")
+    print(f"Estimated liq price:  {summary['liq_price']:.2f} USD")
+
+    print("\n--- TP / SL Analysis ---")
+    print(f"TP price:             {summary['tp']:.2f} USD")
+    print(f"  PnL at TP:          {summary['pnl_tp']:.2f} USDT")
+    print(f"  Move from entry:    {summary['move_tp_pct']:.2f}%")
+
+    print(f"\nSL price:             {summary['sl']:.2f} USD")
+    print(f"  PnL at SL:          {summary['pnl_sl']:.2f} USDT")
+    print(f"  Move from entry:    {summary['move_sl_pct']:.2f}%")
+
+    print(f"\nRisk / Reward ratio (|TP| : |SL|): {summary['rr_text']}")
+
+
 def main():
     print("\n===== BYBIT ISOLATED CALCULATOR (IM-BASED) =====\n")
     print("This version uses:")
     print("  - Initial margin + leverage for each entry")
     print("  - Calculates notional, BTC size, average entry")
     print("  - Estimates isolated liquidation price (no fees/buffers)")
-    print("  - Calculates PnL for Take Profit (TP) and Stop Loss (SL)\n")
+    print("  - Calculates PnL for Take Profit (TP) and Stop Loss (SL)")
+    print("  - Allows adding more positions AFTER seeing initial results\n")
 
     # 1) Side: long or short
     side = ""
@@ -40,18 +132,13 @@ def main():
     n = get_int("\nNumber of entries (e.g. 1, 2, 3): ")
 
     entries = []
-    total_notional = 0.0
-    total_btc = 0.0
-
     for i in range(n):
         print(f"\nEntry #{i + 1}")
         entry_price = get_float("  Entry price (USD): ")
         im = get_float("  Initial margin (USDT): ")
         lev = get_float("  Leverage (e.g. 2): ")
 
-        # notional value in USDT
         notional = im * lev
-        # BTC size
         size_btc = notional / entry_price
 
         entries.append({
@@ -62,29 +149,7 @@ def main():
             "size_btc": size_btc
         })
 
-        total_notional += notional
-        total_btc += size_btc
-
-    if total_btc <= 0:
-        print("\nTotal BTC size is zero or negative. Something went wrong.")
-        input("\nPress Enter to exit...")
-        return
-
-    # 4) Weighted average entry (by BTC size)
-    weighted_sum = sum(e["entry"] * e["size_btc"] for e in entries)
-    avg_entry = weighted_sum / total_btc
-
-    # 5) Total initial margin and maintenance margin
-    total_im = sum(e["im"] for e in entries)
-    maintenance_margin = total_notional * mmr
-
-    # 6) Isolated liquidation price (simplified, no fee buffer)
-    if side == "short":
-        liq_price = avg_entry + (total_im - maintenance_margin) / total_btc
-    else:  # long
-        liq_price = avg_entry - (total_im - maintenance_margin) / total_btc
-
-    # 7) Ask for TP and SL
+    # 4) Ask for TP and SL once (we will reuse for all recalculations)
     print("\nNow enter your Take Profit and Stop Loss levels.")
     print("For SHORT: TP < avg_entry, SL > avg_entry (usually).")
     print("For LONG:  TP > avg_entry, SL < avg_entry (usually).")
@@ -92,49 +157,63 @@ def main():
     tp = get_float("Take Profit price (USD): ")
     sl = get_float("Stop Loss price  (USD): ")
 
-    # 8) PnL calculations
-    # For long:  PnL = (price - avg_entry) * Q
-    # For short: PnL = (avg_entry - price) * Q
-    if side == "short":
-        pnl_tp = (avg_entry - tp) * total_btc
-        pnl_sl = (avg_entry - sl) * total_btc
-    else:  # long
-        pnl_tp = (tp - avg_entry) * total_btc
-        pnl_sl = (sl - avg_entry) * total_btc
+    # 5) First summary (base state)
+    summary = compute_summary(entries, side, mmr, tp, sl)
+    if summary is None:
+        print("\nTotal BTC size is zero or negative. Something went wrong.")
+        input("\nPress Enter to exit...")
+        return
 
-    # percentage moves from avg entry
-    move_tp_pct = ((tp - avg_entry) / avg_entry) * 100.0
-    move_sl_pct = ((sl - avg_entry) / avg_entry) * 100.0
+    print_summary(summary, side, label="BASE RESULTS")
 
-    # risk : reward (use absolute values, avoid division by zero)
-    risk = abs(pnl_sl)
-    reward = abs(pnl_tp)
-    rr_text = "N/A"
-    if risk > 0:
-        rr = reward / risk
-        rr_text = f"{rr:.2f} : 1"
+    # Store last summary for comparison in the loop
+    last_summary = summary
 
-    # 9) Print results
-    print("\n===== RESULTS =====")
-    print(f"Side:                 {side.upper()}")
-    print(f"MMR:                  {mmr:.6f}")
-    print(f"Total initial margin: {total_im:.2f} USDT")
-    print(f"Total notional:       {total_notional:.2f} USDT")
-    print(f"Total BTC size:       {total_btc:.8f} BTC")
-    print(f"Average entry price:  {avg_entry:.2f} USD")
-    print(f"Maintenance margin:   {maintenance_margin:.2f} USDT")
-    print(f"Estimated liq price:  {liq_price:.2f} USD")
+    # 6) Loop: allow adding more positions and recalculating
+    while True:
+        ans = input("\nDo you want to ADD more positions and recalculate? (y/n): ").strip().lower()
+        if not ans.startswith("y"):
+            break
 
-    print("\n--- TP / SL Analysis ---")
-    print(f"TP price:             {tp:.2f} USD")
-    print(f"  PnL at TP:          {pnl_tp:.2f} USDT")
-    print(f"  Move from entry:    {move_tp_pct:.2f}%")
+        extra_n = get_int("How many additional entries do you want to add now?: ")
 
-    print(f"\nSL price:             {sl:.2f} USD")
-    print(f"  PnL at SL:          {pnl_sl:.2f} USDT")
-    print(f"  Move from entry:    {move_sl_pct:.2f}%")
+        for i in range(extra_n):
+            print(f"\nAdditional Entry #{i + 1}")
+            entry_price = get_float("  Entry price (USD): ")
+            im = get_float("  Initial margin (USDT): ")
+            lev = get_float("  Leverage (e.g. 2): ")
 
-    print(f"\nRisk / Reward ratio (|TP| : |SL|): {rr_text}")
+            notional = im * lev
+            size_btc = notional / entry_price
+
+            entries.append({
+                "entry": entry_price,
+                "im": im,
+                "lev": lev,
+                "notional": notional,
+                "size_btc": size_btc
+            })
+
+        # Recompute after adding new positions
+        new_summary = compute_summary(entries, side, mmr, tp, sl)
+        if new_summary is None:
+            print("\nAfter adding, total BTC size is zero or negative. Something went wrong.")
+            input("\nPress Enter to exit...")
+            return
+
+        # Print updated results
+        print_summary(new_summary, side, label="UPDATED RESULTS AFTER ADDING POSITIONS")
+
+        # Show comparison vs previous state
+        print("\n--- COMPARISON WITH PREVIOUS STATE ---")
+        print(f"Average entry:   {last_summary['avg_entry']:.2f}  ->  {new_summary['avg_entry']:.2f}")
+        print(f"Liq price:       {last_summary['liq_price']:.2f}  ->  {new_summary['liq_price']:.2f}")
+        print(f"PnL at TP:       {last_summary['pnl_tp']:.2f} USDT  ->  {new_summary['pnl_tp']:.2f} USDT")
+        print(f"PnL at SL:       {last_summary['pnl_sl']:.2f} USDT  ->  {new_summary['pnl_sl']:.2f} USDT")
+        print(f"Risk/Reward:     {last_summary['rr_text']}  ->  {new_summary['rr_text']}")
+
+        # Update last_summary for possible next iteration
+        last_summary = new_summary
 
     print("\nDone.")
     input("\nPress Enter to exit...")
