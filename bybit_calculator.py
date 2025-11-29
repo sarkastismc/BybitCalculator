@@ -138,8 +138,8 @@ def main():
     print("  - Calculates PnL for Take Profit (TP) and Stop Loss (SL)")
     print("  - Allows:")
     print("      * adding more positions to the SAME scenario")
-    print("      * starting NEW scenarios with different entries")
-    print("        while keeping all previous calculations on screen\n")
+    print("      * creating NEW scenarios that always include the INITIAL position")
+    print("        so you can test different extra entries vs the same base\n")
 
     # 1) Side: long or short
     side = ""
@@ -153,10 +153,11 @@ def main():
     print("  - For your position sizes, use 0.005 (0.5%)")
     mmr = get_float("MMR (example 0.005): ")
 
-    # 3) Number of entries for the FIRST scenario
-    n = get_int("\nNumber of entries (e.g. 1, 2, 3): ")
+    # 3) Number of entries for the FIRST (base) scenario
+    n = get_int("\nNumber of entries for your INITIAL position: ")
 
-    entries = input_entries(n)
+    base_entries = input_entries(n)   # store the base entries
+    entries = list(base_entries)      # current scenario entries start as base
 
     # 4) Ask for TP and SL once (reused for all scenarios)
     print("\nNow enter your Take Profit and Stop Loss levels.")
@@ -170,22 +171,22 @@ def main():
     scenario_num = 1
 
     # 5) First summary (base state)
-    summary = compute_summary(entries, side, mmr, tp, sl)
-    if summary is None:
+    base_summary = compute_summary(base_entries, side, mmr, tp, sl)
+    if base_summary is None:
         print("\nTotal BTC size is zero or negative. Something went wrong.")
         input("\nPress Enter to exit...")
         return
 
-    print_summary(summary, side, label=f"SCENARIO #{scenario_num} (BASE RESULTS)")
+    print_summary(base_summary, side, label=f"SCENARIO #{scenario_num} (BASE - INITIAL POSITION)")
 
-    last_summary = summary
-    last_entries = entries
+    # current scenario mirrors base initially
+    last_summary = base_summary
 
     # 6) Main loop: allow adding positions OR creating new scenarios
     while True:
         print("\nWhat do you want to do next?")
         print("  1) Add more positions to CURRENT scenario and recalculate")
-        print("  2) Start a NEW scenario (different entries) but keep previous results on screen")
+        print("  2) Start a NEW scenario: INITIAL position + NEW extra entries")
         print("  3) Exit")
         choice = input("Choice (1/2/3): ").strip()
 
@@ -193,7 +194,7 @@ def main():
             break
 
         elif choice == "1":
-            # Add more positions to CURRENT scenario
+            # Add more positions to CURRENT scenario (entries variable)
             extra_n = get_int("How many additional entries do you want to add now?: ")
             new_entries = input_entries(extra_n)
             entries.extend(new_entries)
@@ -204,44 +205,46 @@ def main():
                 input("\nPress Enter to exit...")
                 return
 
-            print_summary(new_summary, side, label=f"SCENARIO #{scenario_num} UPDATED (ADDED POSITIONS)")
+            print_summary(new_summary, side, label=f"SCENARIO #{scenario_num} UPDATED (ADDED POSITIONS TO CURRENT)")
 
-            print("\n--- COMPARISON WITH PREVIOUS STATE ---")
+            print("\n--- COMPARISON WITH PREVIOUS STATE (same scenario) ---")
             print(f"Average entry:   {last_summary['avg_entry']:.2f}  ->  {new_summary['avg_entry']:.2f}")
             print(f"Liq price:       {last_summary['liq_price']:.2f}  ->  {new_summary['liq_price']:.2f}")
             print(f"PnL at TP:       {last_summary['pnl_tp']:.2f} USDT  ->  {new_summary['pnl_tp']:.2f} USDT")
             print(f"PnL at SL:       {last_summary['pnl_sl']:.2f} USDT  ->  {new_summary['pnl_sl']:.2f} USDT")
             print(f"Risk/Reward:     {last_summary['rr_text']}  ->  {new_summary['rr_text']}")
 
-            last_summary = new_summary
-            last_entries = entries
+            last_summary = new_summary  # update current scenario state
 
         elif choice == "2":
-            # NEW scenario with different entries (but same side, MMR, TP/SL)
+            # NEW scenario: always base_entries + new extra entries
             scenario_num += 1
-            print(f"\n--- NEW SCENARIO #{scenario_num} ---")
-            new_n = get_int("Number of entries for this NEW scenario: ")
-            new_entries = input_entries(new_n)
+            print(f"\n--- NEW SCENARIO #{scenario_num} (BASE + NEW EXTRA ENTRIES) ---")
+            new_n = get_int("How many EXTRA entries do you want to add ON TOP of the INITIAL position?: ")
+            extra_entries = input_entries(new_n)
 
-            new_summary = compute_summary(new_entries, side, mmr, tp, sl)
+            # For this scenario: base + extra
+            scenario_entries = list(base_entries) + extra_entries
+
+            new_summary = compute_summary(scenario_entries, side, mmr, tp, sl)
             if new_summary is None:
                 print("\nTotal BTC size is zero or negative in new scenario. Something went wrong.")
                 input("\nPress Enter to exit...")
                 return
 
-            print_summary(new_summary, side, label=f"SCENARIO #{scenario_num} (NEW)")
+            print_summary(new_summary, side, label=f"SCENARIO #{scenario_num} (INITIAL + EXTRA)")
 
-            # Compare this new scenario vs the immediately previous scenario
-            print("\n--- COMPARISON WITH PREVIOUS SCENARIO ---")
-            print(f"Average entry:   {last_summary['avg_entry']:.2f}  ->  {new_summary['avg_entry']:.2f}")
-            print(f"Liq price:       {last_summary['liq_price']:.2f}  ->  {new_summary['liq_price']:.2f}")
-            print(f"PnL at TP:       {last_summary['pnl_tp']:.2f} USDT  ->  {new_summary['pnl_tp']:.2f} USDT")
-            print(f"PnL at SL:       {last_summary['pnl_sl']:.2f} USDT  ->  {new_summary['pnl_sl']:.2f} USDT")
-            print(f"Risk/Reward:     {last_summary['rr_text']}  ->  {new_summary['rr_text']}")
+            # Compare this new scenario vs the BASE scenario (initial position only)
+            print("\n--- COMPARISON WITH BASE SCENARIO (INITIAL POSITION ONLY) ---")
+            print(f"Average entry:   {base_summary['avg_entry']:.2f}  ->  {new_summary['avg_entry']:.2f}")
+            print(f"Liq price:       {base_summary['liq_price']:.2f}  ->  {new_summary['liq_price']:.2f}")
+            print(f"PnL at TP:       {base_summary['pnl_tp']:.2f} USDT  ->  {new_summary['pnl_tp']:.2f} USDT")
+            print(f"PnL at SL:       {base_summary['pnl_sl']:.2f} USDT  ->  {new_summary['pnl_sl']:.2f} USDT")
+            print(f"Risk/Reward:     {base_summary['rr_text']}  ->  {new_summary['rr_text']}")
 
-            # Update "current" scenario state to this new one
-            entries = new_entries
-            last_entries = new_entries
+            # Also update current scenario state so if you choose "1" after this,
+            # you'll be modifying this last scenario further.
+            entries = scenario_entries
             last_summary = new_summary
 
         else:
