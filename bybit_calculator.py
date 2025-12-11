@@ -16,239 +16,301 @@ def get_int(prompt):
             print("Invalid integer. Try again.")
 
 
-def compute_summary(entries, side, mmr, tp, sl):
+def compute_base(position_side, mmr, leverage, entries):
     """
-    entries: list of dicts:
-      { "entry": float, "im": float, "lev": float, "notional": float, "size_btc": float }
+    entries: list of dicts with {"entry": price, "im": initial_margin}
     side: 'long' or 'short'
     mmr: maintenance margin rate
-    tp, sl: prices for take profit / stop loss
+    leverage: same leverage used for all entries
 
-    Returns a dict with all important values.
+    Returns dict with base stats: avg_entry, Q (btc size), IM, NV, MM, base_liq
     """
-    total_notional = sum(e["notional"] for e in entries)
-    total_btc = sum(e["size_btc"] for e in entries)
+    side = position_side.lower()
+    L = leverage
+    m = mmr
 
-    if total_btc <= 0:
+    # Compute per-entry notional & size
+    sizes = []
+    notionals = []
+    weighted_sum = 0.0
+    for e in entries:
+        price = e["entry"]
+        im = e["im"]
+        notional = im * L
+        size = notional / price
+        sizes.append(size)
+        notionals.append(notional)
+        weighted_sum += price * size
+
+    Q0 = sum(sizes)
+    NV0 = sum(notionals)
+    IM0 = sum(e["im"] for e in entries)
+
+    if Q0 <= 0 or NV0 <= 0:
         return None
 
-    # Weighted average entry (by BTC size)
-    weighted_sum = sum(e["entry"] * e["size_btc"] for e in entries)
-    avg_entry = weighted_sum / total_btc
+    avg0 = weighted_sum / Q0
+    MM0 = NV0 * m
 
-    # Total initial margin and maintenance margin
-    total_im = sum(e["im"] for e in entries)
-    maintenance_margin = total_notional * mmr
-
-    # Estimated isolated liquidation price (simplified, no fee buffer)
     if side == "short":
-        liq_price = avg_entry + (total_im - maintenance_margin) / total_btc
+        base_liq = avg0 + (IM0 - MM0) / Q0
     else:  # long
-        liq_price = avg_entry - (total_im - maintenance_margin) / total_btc
-
-    # PnL at TP and SL
-    if side == "short":
-        pnl_tp = (avg_entry - tp) * total_btc
-        pnl_sl = (avg_entry - sl) * total_btc
-    else:  # long
-        pnl_tp = (tp - avg_entry) * total_btc
-        pnl_sl = (sl - avg_entry) * total_btc
-
-    # percentage moves from avg entry
-    move_tp_pct = ((tp - avg_entry) / avg_entry) * 100.0
-    move_sl_pct = ((sl - avg_entry) / avg_entry) * 100.0
-
-    # risk : reward (use absolute values)
-    risk = abs(pnl_sl)
-    reward = abs(pnl_tp)
-    if risk > 0:
-        rr = reward / risk
-        rr_text = f"{rr:.2f} : 1"
-    else:
-        rr_text = "N/A"
+        base_liq = avg0 - (IM0 - MM0) / Q0
 
     return {
-        "total_notional": total_notional,
-        "total_btc": total_btc,
-        "avg_entry": avg_entry,
-        "total_im": total_im,
-        "maintenance_margin": maintenance_margin,
-        "liq_price": liq_price,
-        "pnl_tp": pnl_tp,
-        "pnl_sl": pnl_sl,
-        "move_tp_pct": move_tp_pct,
-        "move_sl_pct": move_sl_pct,
-        "rr_text": rr_text,
-        "tp": tp,
-        "sl": sl,
+        "avg_entry": avg0,
+        "Q0": Q0,
+        "IM0": IM0,
+        "NV0": NV0,
+        "MM0": MM0,
+        "liq0": base_liq,
+        "L": L,
+        "m": m,
     }
 
 
-def print_summary(summary, side, label="RESULTS"):
-    """Pretty print a summary block."""
-    print(f"\n===== {label} =====")
-    print(f"Side:                 {side.upper()}")
-    print(f"Total initial margin: {summary['total_im']:.2f} USDT")
-    print(f"Total notional:       {summary['total_notional']:.2f} USDT")
-    print(f"Total BTC size:       {summary['total_btc']:.8f} BTC")
-    print(f"Average entry price:  {summary['avg_entry']:.2f} USD")
-    print(f"Maintenance margin:   {summary['maintenance_margin']:.2f} USDT")
-    print(f"Estimated liq price:  {summary['liq_price']:.2f} USD")
+def solve_margin_for_target_liq_short(base, target_liq, entry_new):
+    """
+    Short side: solve for new initial margin (im) given:
+      - target liquidation price T
+      - new entry price e (entry_new)
+      - same leverage L and mmr m
+    Using formula derived from:
+      T = Avg1 + (IM1 - MM1)/Q1
+    Returns im or None if impossible.
+    """
+    T = target_liq
+    e = entry_new
+    L = base["L"]
+    m = base["m"]
+    Q0 = base["Q0"]
+    IM0 = base["IM0"]
+    NV0 = base["NV0"]
+    avg0 = base["avg_entry"]
 
-    print("\n--- TP / SL Analysis ---")
-    print(f"TP price:             {summary['tp']:.2f} USD")
-    print(f"  PnL at TP:          {summary['pnl_tp']:.2f} USDT")
-    print(f"  Move from entry:    {summary['move_tp_pct']:.2f}%")
+    A = avg0 * Q0
+    B = Q0
+    C = NV0
 
-    print(f"\nSL price:             {summary['sl']:.2f} USD")
-    print(f"  PnL at SL:          {summary['pnl_sl']:.2f} USDT")
-    print(f"  Move from entry:    {summary['move_sl_pct']:.2f}%")
+    numerator = T * B - (A + IM0 - C * m)
+    denom = (L + 1 - L * m) - (T * L / e)
 
-    print(f"\nRisk / Reward ratio (|TP| : |SL|): {summary['rr_text']}")
+    if abs(denom) < 1e-12:
+        return None
+
+    im = numerator / denom
+    return im
 
 
-def input_entries(count):
-    """Ask user for 'count' entries and return a list of entry dicts."""
-    entries = []
-    for i in range(count):
-        print(f"\nEntry #{i + 1}")
-        entry_price = get_float("  Entry price (USD): ")
-        im = get_float("  Initial margin (USDT): ")
-        lev = get_float("  Leverage (e.g. 2): ")
+def solve_margin_for_target_liq_long(base, target_liq, entry_new):
+    """
+    Long side version: solve for im given target liq T and entry_new e.
+    """
+    T = target_liq
+    e = entry_new
+    L = base["L"]
+    m = base["m"]
+    Q0 = base["Q0"]
+    IM0 = base["IM0"]
+    NV0 = base["NV0"]
+    avg0 = base["avg_entry"]
 
-        notional = im * lev
-        size_btc = notional / entry_price
+    A = avg0 * Q0
+    B = Q0
+    C = NV0
 
-        entries.append({
-            "entry": entry_price,
-            "im": im,
-            "lev": lev,
-            "notional": notional,
-            "size_btc": size_btc
-        })
-    return entries
+    numerator = T * B - (A - IM0 + C * m)
+    denom = (L - 1 + L * m) - (T * L / e)
+
+    if abs(denom) < 1e-12:
+        return None
+
+    im = numerator / denom
+    return im
+
+
+def solve_entry_for_target_liq_short(base, target_liq, im_new):
+    """
+    Short side: solve for entry price e given target liq T and new initial margin im_new.
+    """
+    T = target_liq
+    K = im_new  # new IM
+    L = base["L"]
+    m = base["m"]
+    Q0 = base["Q0"]
+    IM0 = base["IM0"]
+    NV0 = base["NV0"]
+    avg0 = base["avg_entry"]
+
+    A = avg0 * Q0
+    B = Q0
+    C = NV0
+
+    # N0 = A + IM0 + K - C*m - K*L*m
+    N0 = A + IM0 + K - C * m - K * L * m
+    denom = N0 - T * B
+
+    if abs(denom) < 1e-12:
+        return None
+
+    e = T * K * L / denom
+    return e
+
+
+def solve_entry_for_target_liq_long(base, target_liq, im_new):
+    """
+    Long side: solve for entry price e given target liq T and new initial margin im_new.
+    """
+    T = target_liq
+    K = im_new  # new IM
+    L = base["L"]
+    m = base["m"]
+    Q0 = base["Q0"]
+    IM0 = base["IM0"]
+    NV0 = base["NV0"]
+    avg0 = base["avg_entry"]
+
+    A = avg0 * Q0
+    B = Q0
+    C = NV0
+
+    # N0 = (A - IM0 + C*m) + K*(L - 1 + L*m)
+    N0 = (A - IM0 + C * m) + K * (L - 1 + L * m)
+    denom = N0 - T * B
+
+    if abs(denom) < 1e-12:
+        return None
+
+    e = T * K * L / denom
+    return e
+
+
+def show_combined_result(base, side, im_new, entry_new, target_liq):
+    """
+    For information: compute and show the new combined stats with the extra position.
+    """
+    L = base["L"]
+    m = base["m"]
+
+    # Old totals
+    Q0 = base["Q0"]
+    NV0 = base["NV0"]
+    IM0 = base["IM0"]
+    avg0 = base["avg_entry"]
+
+    # New position
+    notional_new = im_new * L
+    size_new = notional_new / entry_new
+
+    # New totals
+    Q1 = Q0 + size_new
+    NV1 = NV0 + notional_new
+    IM1 = IM0 + im_new
+    avg1 = (avg0 * Q0 + entry_new * size_new) / Q1
+    MM1 = NV1 * m
+
+    if side == "short":
+        liq1 = avg1 + (IM1 - MM1) / Q1
+    else:
+        liq1 = avg1 - (IM1 - MM1) / Q1
+
+    print("\n--- NEW COMBINED POSITION (INFO) ---")
+    print(f"New added position: entry={entry_new:.2f}, IM={im_new:.2f}, notional={notional_new:.2f}, size={size_new:.8f} BTC")
+    print(f"New average entry:  {avg1:.2f}")
+    print(f"New total IM:       {IM1:.2f}")
+    print(f"New total notional: {NV1:.2f}")
+    print(f"New total size:     {Q1:.8f} BTC")
+    print(f"New estimated liq:  {liq1:.2f} (target was {target_liq:.2f})")
 
 
 def main():
-    print("\n===== BYBIT ISOLATED CALCULATOR (IM-BASED) =====\n")
-    print("This version uses:")
-    print("  - Initial margin + leverage for each entry")
-    print("  - Calculates notional, BTC size, average entry")
-    print("  - Estimates isolated liquidation price (no fees/buffers)")
-    print("  - Calculates PnL for Take Profit (TP) and Stop Loss (SL)")
-    print("  - Allows:")
-    print("      * adding more positions to the SAME scenario")
-    print("      * creating NEW scenarios that always include the INITIAL position")
-    print("        so you can test different extra entries vs the same base\n")
+    print("\n===== BYBIT LIQUIDATION PUSH CALCULATOR (ISOLATED, SAME LEVERAGE) =====\n")
+    print("This tool assumes:")
+    print("  - Isolated margin")
+    print("  - All positions same direction (all long OR all short)")
+    print("  - Same leverage for existing and new position")
+    print("It will compute the extra position needed to move liq to a desired target.\n")
 
-    # 1) Side: long or short
+    # 1) Side
     side = ""
     while side.lower() not in ("long", "short"):
-        side = input("Position side (long/short): ").strip().lower()
+        side = input("Current position side (long/short): ").strip().lower()
         if side not in ("long", "short"):
             print("Please type 'long' or 'short'.")
 
-    # 2) MMR (maintenance margin rate)
+    # 2) MMR
     print("\nMaintenance Margin Rate (MMR) example for BTC:")
-    print("  - For your position sizes, use 0.005 (0.5%)")
-    mmr = get_float("MMR (example 0.005): ")
+    print("  For typical BTC positions: 0.005 (0.5%)")
+    mmr = get_float("MMR (e.g. 0.005): ")
 
-    # 3) Number of entries for the FIRST (base) scenario
-    n = get_int("\nNumber of entries for your INITIAL position: ")
+    # 3) Leverage (shared)
+    leverage = get_float("\nLeverage used (same for all entries, e.g. 2): ")
 
-    base_entries = input_entries(n)   # store the base entries
-    entries = list(base_entries)      # current scenario entries start as base
+    # 4) Existing entries
+    n = get_int("\nNumber of existing entries in this direction: ")
+    entries = []
+    for i in range(n):
+        print(f"\nExisting Entry #{i + 1}")
+        price = get_float("  Entry price (USD): ")
+        im = get_float("  Initial margin for this entry (USDT): ")
+        entries.append({"entry": price, "im": im})
 
-    # 4) Ask for TP and SL once (reused for all scenarios)
-    print("\nNow enter your Take Profit and Stop Loss levels.")
-    print("For SHORT: TP < avg_entry, SL > avg_entry (usually).")
-    print("For LONG:  TP > avg_entry, SL < avg_entry (usually).")
-
-    tp = get_float("Take Profit price (USD): ")
-    sl = get_float("Stop Loss price  (USD): ")
-
-    # Scenario counter
-    scenario_num = 1
-
-    # 5) First summary (base state)
-    base_summary = compute_summary(base_entries, side, mmr, tp, sl)
-    if base_summary is None:
-        print("\nTotal BTC size is zero or negative. Something went wrong.")
+    base = compute_base(side, mmr, leverage, entries)
+    if base is None:
+        print("\nSomething went wrong (zero size / notional).")
         input("\nPress Enter to exit...")
         return
 
-    print_summary(base_summary, side, label=f"SCENARIO #{scenario_num} (BASE - INITIAL POSITION)")
+    print("\n--- CURRENT POSITION STATS ---")
+    print(f"Average entry:   {base['avg_entry']:.2f} USD")
+    print(f"Total BTC size:  {base['Q0']:.8f}")
+    print(f"Total notional:  {base['NV0']:.2f} USDT")
+    print(f"Total IM:        {base['IM0']:.2f} USDT")
+    print(f"Current liq:     {base['liq0']:.2f} USD")
 
-    # current scenario mirrors base initially
-    last_summary = base_summary
+    # 5) Target liq
+    print("\nEnter the desired (target) liquidation price.")
+    if side == "short":
+        print("For SHORT, pushing liq 'away' usually means a HIGHER liq price (further above).")
+    else:
+        print("For LONG, pushing liq 'away' usually means a LOWER liq price (further below).")
+    target_liq = get_float("Target liquidation price (USD): ")
 
-    # 6) Main loop: allow adding positions OR creating new scenarios
-    while True:
-        print("\nWhat do you want to do next?")
-        print("  1) Add more positions to CURRENT scenario and recalculate")
-        print("  2) Start a NEW scenario: INITIAL position + NEW extra entries")
-        print("  3) Exit")
-        choice = input("Choice (1/2/3): ").strip()
+    # 6) Choose mode
+    print("\nHow do you want to solve this?")
+    print("  1) I know the PRICE I want to open the new position at -> calculate REQUIRED initial margin")
+    print("  2) I know how much INITIAL MARGIN I want to add -> calculate REQUIRED entry price")
+    mode = ""
+    while mode not in ("1", "2"):
+        mode = input("Choice (1/2): ").strip()
 
-        if choice == "3":
-            break
-
-        elif choice == "1":
-            # Add more positions to CURRENT scenario (entries variable)
-            extra_n = get_int("How many additional entries do you want to add now?: ")
-            new_entries = input_entries(extra_n)
-            entries.extend(new_entries)
-
-            new_summary = compute_summary(entries, side, mmr, tp, sl)
-            if new_summary is None:
-                print("\nAfter adding, total BTC size is zero or negative. Something went wrong.")
-                input("\nPress Enter to exit...")
-                return
-
-            print_summary(new_summary, side, label=f"SCENARIO #{scenario_num} UPDATED (ADDED POSITIONS TO CURRENT)")
-
-            print("\n--- COMPARISON WITH PREVIOUS STATE (same scenario) ---")
-            print(f"Average entry:   {last_summary['avg_entry']:.2f}  ->  {new_summary['avg_entry']:.2f}")
-            print(f"Liq price:       {last_summary['liq_price']:.2f}  ->  {new_summary['liq_price']:.2f}")
-            print(f"PnL at TP:       {last_summary['pnl_tp']:.2f} USDT  ->  {new_summary['pnl_tp']:.2f} USDT")
-            print(f"PnL at SL:       {last_summary['pnl_sl']:.2f} USDT  ->  {new_summary['pnl_sl']:.2f} USDT")
-            print(f"Risk/Reward:     {last_summary['rr_text']}  ->  {new_summary['rr_text']}")
-
-            last_summary = new_summary  # update current scenario state
-
-        elif choice == "2":
-            # NEW scenario: always base_entries + new extra entries
-            scenario_num += 1
-            print(f"\n--- NEW SCENARIO #{scenario_num} (BASE + NEW EXTRA ENTRIES) ---")
-            new_n = get_int("How many EXTRA entries do you want to add ON TOP of the INITIAL position?: ")
-            extra_entries = input_entries(new_n)
-
-            # For this scenario: base + extra
-            scenario_entries = list(base_entries) + extra_entries
-
-            new_summary = compute_summary(scenario_entries, side, mmr, tp, sl)
-            if new_summary is None:
-                print("\nTotal BTC size is zero or negative in new scenario. Something went wrong.")
-                input("\nPress Enter to exit...")
-                return
-
-            print_summary(new_summary, side, label=f"SCENARIO #{scenario_num} (INITIAL + EXTRA)")
-
-            # Compare this new scenario vs the BASE scenario (initial position only)
-            print("\n--- COMPARISON WITH BASE SCENARIO (INITIAL POSITION ONLY) ---")
-            print(f"Average entry:   {base_summary['avg_entry']:.2f}  ->  {new_summary['avg_entry']:.2f}")
-            print(f"Liq price:       {base_summary['liq_price']:.2f}  ->  {new_summary['liq_price']:.2f}")
-            print(f"PnL at TP:       {base_summary['pnl_tp']:.2f} USDT  ->  {new_summary['pnl_tp']:.2f} USDT")
-            print(f"PnL at SL:       {base_summary['pnl_sl']:.2f} USDT  ->  {new_summary['pnl_sl']:.2f} USDT")
-            print(f"Risk/Reward:     {base_summary['rr_text']}  ->  {new_summary['rr_text']}")
-
-            # Also update current scenario state so if you choose "1" after this,
-            # you'll be modifying this last scenario further.
-            entries = scenario_entries
-            last_summary = new_summary
-
+    if mode == "1":
+        # User gives entry_new, we solve for IM_new
+        entry_new = get_float("\nPrice for NEW position (USD): ")
+        if side == "short":
+            im_new = solve_margin_for_target_liq_short(base, target_liq, entry_new)
         else:
-            print("Invalid choice. Please type 1, 2, or 3.")
+            im_new = solve_margin_for_target_liq_long(base, target_liq, entry_new)
+
+        if im_new is None or im_new <= 0:
+            print("\nNo valid solution for this target/liq at that entry price with same leverage.")
+        else:
+            print(f"\nRequired INITIAL MARGIN for new position at {entry_new:.2f}: {im_new:.2f} USDT")
+            show_combined_result(base, side, im_new, entry_new, target_liq)
+
+    else:
+        # mode == "2": user gives IM_new, we solve for entry_new
+        im_new = get_float("\nInitial margin (USDT) for NEW position: ")
+        if side == "short":
+            entry_new = solve_entry_for_target_liq_short(base, target_liq, im_new)
+        else:
+            entry_new = solve_entry_for_target_liq_long(base, target_liq, im_new)
+
+        if entry_new is None or entry_new <= 0:
+            print("\nNo valid entry price solution for this target/liq with that margin and same leverage.")
+        else:
+            print(f"\nRequired ENTRY PRICE for new position with IM={im_new:.2f}: {entry_new:.2f} USD")
+            show_combined_result(base, side, im_new, entry_new, target_liq)
 
     print("\nDone.")
     input("\nPress Enter to exit...")
